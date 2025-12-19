@@ -39,7 +39,8 @@ echo "Installing debloated packages..."
 echo "---------------------------------------------------------------"
 wget --retry-connrefused --tries=30 "$EXTRA_PACKAGES" -O ./get-debloated-pkgs.sh
 chmod +x ./get-debloated-pkgs.sh
-./get-debloated-pkgs.sh --add-common
+./get-debloated-pkgs.sh --add-common --prefer-nano
+./get-debloated-pkgs.sh mesa-mini
 
 echo "Bundling AppImage..."
 echo "---------------------------------------------------------------"
