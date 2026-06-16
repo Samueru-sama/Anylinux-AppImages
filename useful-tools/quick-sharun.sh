@@ -324,7 +324,10 @@ _get_icon() {
 
 _sanity_check() {
 	for d in $DEPENDENCIES; do
-		_is_cmd "$d" || _err_msg "ERROR: Missing dependency '$d'!"
+		if ! _is_cmd "$d"; then
+			_err_msg "ERROR: Missing dependency '$d'!"
+			exit 1
+		fi
 	done
 
 	if ! mkdir -p "$APPDIR"/share "$APPDIR"/bin; then
@@ -2650,6 +2653,23 @@ _add_hooks_library() {
 	CACHEDIR=${XDG_CACHE_HOME:-~/.cache}
 	STATEDIR=${XDG_STATE_HOME:-~/.local/state}
 
+	# always change XDG_CACHE_HOME to our own dedicated location
+	# using the host XDG_CACHE_HOME has been a source of issues
+	# See: https://github.com/pkgforge-dev/Anylinux-AppImages/issues/657
+	if [ "$USE_HOST_XDG_CACHE_HOME" != 1 ] && [ -n "$APPIMAGE" ]; then
+	        case "$XDG_CACHE_HOME" in
+	                *"$APPIMAGE"*) # make sure we are not using the portable cache first
+	                        :
+	                        ;;
+	                *)
+	                        _cache_dir=$CACHEDIR/AppImage-Cache
+	                        if [ -d "$_cache_dir" ] || mkdir -p "$_cache_dir" 2>/dev/null; then
+	                                export XDG_CACHE_HOME="$_cache_dir"
+	                        fi
+	                        ;;
+	        esac
+	fi
+
 	err_msg(){
 	        >&2 printf '\033[1;31m%s\033[0m\n' " $*"
 	}
@@ -3548,6 +3568,31 @@ for lib do case "$lib" in
 
 		_echo "* fixed path to /etc/ssl/certs in $lib"
 		_patch_away_usr_share_dir "$lib" || continue
+		;;
+	*/libcrypto.so*)
+		# Apps may fail to connect to internet if they use the host ssl config
+		# see: https://github.com/pkgforge-dev/Viber-AppImage-Enhanced/issues/16
+
+		# make a minimal ssl config instead of copying the hosts
+		dst_ssl_conf=$APPDIR/etc/ssl/openssl.cnf
+		if [ ! -f "$dst_ssl_conf" ]; then
+			mkdir -p "${dst_ssl_conf%/*}"
+			cat <<-'EOF' > "$dst_ssl_conf"
+			[openssl_conf]
+			openssl_conf = openssl_init
+
+			[openssl_init]
+			providers = provider_sect
+
+			[provider_sect]
+			default = default_sect
+
+			[default_sect]
+			activate = 1
+			EOF
+			echo 'OPENSSL_CONF=${SHARUN_DIR}/etc/ssl/openssl.cnf' >> "$APPENV"
+			_echo "* added minimal ssl config"
+		fi
 		;;
 	*/libgimpwidgets*)
 		_patch_away_usr_share_dir "$lib" || continue
