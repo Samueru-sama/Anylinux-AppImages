@@ -98,6 +98,7 @@ fi
 # for sharun
 export DST_DIR="$APPDIR"
 export STRACE_MODE=${STRACE_MODE:-1}
+export STRACE_TIME=${STRACE_TIME:-5}
 
 # github actions doesn't set USER and XDG_RUNTIME_DIR
 # causing some apps crash when running xvfb-run
@@ -1241,124 +1242,100 @@ _deploy_libs() {
 # lib4bin integration - library/bin deployment engine
 # ----------------------------------------------------------------------------
 
-# compute destination path for a library in the shared/ tree
+# get destination path for libs in DST_LIB_DIR
+# $1 = file path (we resolve dirname + canonicalize internally)
 _lib4bin_get_lib_dst_dir() {
-	# $1 = dst_dir_pth  $2 = lib_dir  $3 = lib_src_dirname_pth
-	printf '%s\n' "$3" | \
-	sed -E "s|$DST_DIR||;s|/shared||;s|^/usr||;s|^/opt||;s|^/lib(64\|32)?||;s|^/[^/]*-linux-gnu||" | \
-	while read -r _res
-		do echo "${1}/${2}${_res}"
-	done
+	p=$(readlink -f "${1%/*}" | sed \
+	  -e "s|^$LIB_DIR||" \
+	  -e 's|^/usr||'     \
+	  -e 's|^/opt||'     \
+	  -e 's|^/lib64||'   \
+	  -e 's|^/lib32||'   \
+	  -e 's|^/lib||'     \
+	  -e 's|^/[^/]*-linux-gnu||'
+	)
+	echo "$DST_LIB_DIR"/"$p"
 }
 
-# collect direct library dependencies via ldd
+# collect direct library dependencies via ldd, new line separated entries
 _lib4bin_collect_ldd() {
-	# stdin = newline-separated binary list
-	# stdout = newline-separated library paths
-	ALL_LIBS=''
-	while read -r binary; do
-		[ -z "$binary" ] && continue
-		binary_src_pth="$binary"
-		[ -L "$binary" ] && binary_src_pth="$(readlink -f "$binary")"
-		binary_name="$(basename "$binary")"
-		[ "$binary" = 'sharun' ] && binary_src_pth="$DST_DIR/sharun"
-		if _is_elf "$binary_src_pth"; then
-			ALL_LIBS="$(printf '%s\n%s' "$ALL_LIBS" "$(_lib4bin_ldd_libs "$binary_src_pth")")"
-			case "$binary_name" in
-				*.so|*.so.[0-9]*) ALL_LIBS="$(printf '%s\n%s' "$ALL_LIBS" "$binary")" ;;
-			esac
-		fi
+	ret=""
+	while read -r b; do
+		b=$(readlink -f "$b") || continue
+		_is_elf "$b"          || continue
+
+		ret=$(printf '%s\n%s' "$ret" "$(_lib4bin_ldd_libs "$b")")
+		case "${b##*/}" in
+			*.so|*.so.[0-9]*)
+				ret="$(printf '%s\n%s' "$ret" "$b")"
+				;;
+		esac
 	done
-	printf '%s\n' "$ALL_LIBS" | sort -u | sed '/^$/d'
+	printf '%s\n' "$ret" | sort -u | sed '/^$/d'
 }
 
-# collect dlopen'd libraries via LD_DEBUG=libs
+# collect dlopen'd libraries via LD_DEBUG=libs, new line separated entries
 _lib4bin_collect_strace() {
-	# stdin = newline-separated binary list
-	# stdout = newline-separated library paths
-	[ "$STRACE_MODE" != 1 ] && return 0
+	[ "$STRACE_MODE" = 1 ] || return 0
 
-	ALL_STRLIBS=''
-	while read -r binary; do
-		[ -z "$binary" ] && continue
-		binary_src_pth="$binary"
-		[ -L "$binary" ] && binary_src_pth="$(readlink -f "$binary")"
-		binary_name="$(basename "$binary")"
-		case "$binary_name" in
-			*.so|*.so.[0-9]*) continue ;;
+	ret=''
+	while read -r b; do
+		b=$(readlink -f "$b")
+		_is_elf "$b" || continue
+		[ -x "$b" ]  || continue
+		case "${b##*/}" in
+			*.so|*.so.[0-9]*) continue;;
 		esac
-		[ "$binary" = 'sharun' ] && continue
-		if _is_elf "$binary_src_pth" && [ -x "$binary_src_pth" ]; then
-			b="$(readlink -f "$binary_src_pth")"
-			dlopened_libs="${TMPDIR:-/tmp}/libs.$$"
 
-			_echo "STRACE: [$b] ..."
-			if [ -n "$XVFB_CMD" ]; then
-				$XVFB_CMD env LD_DEBUG=libs "$b" >/dev/null 2>"$dlopened_libs" &
-			else
-				LD_DEBUG=libs "$b" >/dev/null 2>"$dlopened_libs" &
-			fi
-			pid=$!
+		dlopened=$TMPDIR/libs.$$
 
-			sleep "${STRACE_TIME:-5}"
-			kill -TERM $pid 2>/dev/null
-			wait $pid 2>/dev/null || :
-
-			_strace_libs=$(
-				awk '/calling init/{print $NF}' "$dlopened_libs" 2>/dev/null \
-				   | sed \
-				        -e '/nvidia/d'      \
-				        -e '/libcuda/d'     \
-				        -e '/lib-dynload/d' \
-				        -e '/_internal/d'
-			)
-			rm -f "$dlopened_libs"
-
-			if [ -n "$_strace_libs" ]; then
-				ALL_STRLIBS="$(printf '%s\n%s' "$ALL_STRLIBS" "$_strace_libs")"
-			fi
+		_echo "STRACE: [$b] ..."
+		export LD_DEBUG=libs
+		if [ -n "$XVFB_CMD" ]; then
+			$XVFB_CMD "$b" >/dev/null 2>"$dlopened" &
+		else
+			"$b" >/dev/null 2>"$dlopened" &
 		fi
+		pid=$!
+		unset LD_DEBUG
+
+		sleep "$STRACE_TIME"
+		kill -TERM $pid 2>/dev/null
+		wait $pid 2>/dev/null || :
+
+		libs=$(awk '/calling init/{print $NF}' "$dlopened" | sed \
+		                                                     -e '/nvidia/d'      \
+		                                                     -e '/libcuda/d'     \
+		                                                     -e '/lib-dynload/d' \
+		                                                     -e '/_internal/d'
+		)
+		rm -f "$dlopened"
+		[ -n "$libs" ] || continue
+		ret="$(printf '%s\n%s' "$ret" "$libs")"
 	done
-	printf '%s\n' "$ALL_STRLIBS" | sort -u | sed '/^$/d'
+	printf '%s\n' "$ret" | sort -u | sed '/^$/d'
 }
 
 # Phase 2: deploy shared libraries
 _lib4bin_deploy_shared_libs() {
-	# stdin = newline-separated library paths
-	while read -r lib_src_pth; do
-		[ -z "$lib_src_pth" ] && continue
-		unset lib_src_real_pth lib_src_real_name IS_SHARED_OBJ
-		if [ -L "$lib_src_pth" ]; then
-			lib_src_real_pth="$(readlink -f "$lib_src_pth")"
-			lib_src_real_name="$(basename "$lib_src_real_pth")"
-			lib_src_dirname_pth="$(readlink -f "$(dirname "$lib_src_real_pth")")"
-			if _is_elf "$lib_src_real_pth" && ldd "$lib_src_real_pth" >/dev/null 2>&1; then
-				IS_SHARED_OBJ=1
-			fi
-		else
-			lib_src_dirname_pth="$(readlink -f "$(dirname "$lib_src_pth")")"
-			if _is_elf "$lib_src_pth" && ldd "$lib_src_pth" >/dev/null 2>&1; then
-				IS_SHARED_OBJ=1
-			fi
+	while read -r lib; do
+		lib_path=$(readlink -f "$lib")
+		if ! _is_elf "$lib_path" || ! ldd "$lib_path" >/dev/null 2>&1; then
+			_echo "SKIPPED: [$lib] not shared object!"
+			continue
 		fi
-		if [ -n "$IS_SHARED_OBJ" ]; then
-			lib_src_name="$(basename "$lib_src_pth")"
-			printf '%s\n' "$lib_src_dirname_pth" | grep -qE '/lib32|/i386-linux-gnu|/arm-linux-gnu' && lib_dir="lib32"||lib_dir="lib"
-			mkdir -p "${DST_DIR}/${lib_dir}" || exit 1
-			if [ ! -d "${DST_DIR}/shared/${lib_dir}" ] && [ ! -L "${DST_DIR}/shared/${lib_dir}" ]; then
-				(cd "$DST_DIR/shared" && [ -L "$lib_dir" ] || ln -sf "../${lib_dir}" "$lib_dir")||exit 1
-			fi
-			lib_dst_dir_pth="$(_lib4bin_get_lib_dst_dir "$__dst_dir_pth" "$lib_dir" "$lib_src_dirname_pth")"
-			[ -n "$lib_src_real_name" ] && lib_dst_pth="$lib_dst_dir_pth/$lib_src_real_name"||lib_dst_pth="$lib_dst_dir_pth/$lib_src_name"
-			mkdir -p "$lib_dst_dir_pth" || exit 1
-			[ -f "$lib_dst_pth" ] || { cp -fv "$lib_src_pth" "$lib_dst_pth" && chmod 755 "$lib_dst_pth"; } || exit 1
-			if [ -n "$lib_src_real_name" ] && [ "$lib_src_name" != "$lib_src_real_name" ]; then
-				_sym_dst_dir="$(_lib4bin_get_lib_dst_dir "$__dst_dir_pth" "$lib_dir" "$(readlink -f "$(dirname "$lib_src_pth")")")"
-				mkdir -p "$_sym_dst_dir" || exit 1
-				ln -sfr "$lib_dst_dir_pth/$lib_src_real_name" "$_sym_dst_dir/$lib_src_name" || exit 1
-			fi
-		else
-			_echo "SKIPPED: [$lib_src_pth] not shared object!"
+
+		dst_dir=$(_lib4bin_get_lib_dst_dir "$lib_path")
+
+		dst=$dst_dir/${lib_path##*/}
+		mkdir -p "$dst_dir"
+		[ -f "$dst" ] || cp -fv "$lib" "$dst"
+
+		# create symlink if original name is different from lib_path name
+		if [ -L "$lib" ] && [ "${lib##*/}" != "${lib_path##*/}" ]; then
+			d=$(_lib4bin_get_lib_dst_dir "$lib")
+			mkdir -p "$d"
+			ln -sfr "$dst" "$d/${lib##*/}"
 		fi
 	done
 }
@@ -1464,7 +1441,17 @@ _lib4bin_main() {
 	__dst_dir_pth="${DST_DIR}/shared"
 	__sharun_bin_dir_pth="${DST_DIR}/bin"
 	[ -f "$__dst_dir_pth" ] || [ -L "$__dst_dir_pth" ] && __dst_dir_pth="${__dst_dir_pth}.dir"
-	mkdir -p "${DST_DIR}/shared" "$__sharun_bin_dir_pth" || exit 1
+	mkdir -p "${DST_DIR}/shared" "$__sharun_bin_dir_pth"
+
+	# ensure shared/lib -> ../lib symlink (sharun runtime expects this)
+	if [ ! -d "${DST_DIR}/shared/lib" ] && [ ! -L "${DST_DIR}/shared/lib" ]; then
+		mkdir -p "${DST_DIR}/lib"
+		(cd "${DST_DIR}/shared" && ln -sf ../lib lib) || exit 1
+	fi
+	if [ "$LIB32" = 1 ] && [ ! -d "${DST_DIR}/shared/lib32" ] && [ ! -L "${DST_DIR}/shared/lib32" ]; then
+		mkdir -p "${DST_DIR}/lib32"
+		(cd "${DST_DIR}/shared" && ln -sf ../lib32 lib32) || exit 1
+	fi
 
 	_binary_list="$(printf '%s\n' "$@")"
 
