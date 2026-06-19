@@ -24,6 +24,8 @@ APPDIR=${APPDIR:-$PWD/AppDir}
 APPENV=$APPDIR/.env
 DIRICON=$APPDIR/.DirIcon
 DST_LIB_DIR=$APPDIR/lib
+DST_BIN_DIR=$APPDIR/bin
+DST_SHARED_BIN_DIR=$APPDIR/shared/bin
 MAIN_BIN=${MAIN_BIN##*/}
 
 SHARUN_LINK=${SHARUN_LINK:-https://github.com/pkgforge-dev/sharun/releases/latest/download/sharun-$APPIMAGE_ARCH}
@@ -144,6 +146,15 @@ _is_static() {
 _is_script() {
 	shebang=$(head -c 2 "$1" 2>/dev/null)
 	[ "$shebang" = '#!' ]
+}
+
+_is_so() {
+	case "${1##*/}" in
+		*.so|*.so.[0-9]*)
+		return 0
+		;;
+	esac
+	return 1
 }
 
 _lib4bin_ldd_libs() {
@@ -1216,13 +1227,13 @@ _make_deployment_array() {
 }
 
 _get_sharun() {
-	if [ -x "${DST_DIR}/sharun" ]; then
+	if [ -x "$APPDIR/sharun" ]; then
 		return 0
 	fi
 	_echo "Downloading sharun..."
-	_download "${DST_DIR}/sharun" "$SHARUN_LINK"
-	if _is_elf "${DST_DIR}/sharun"; then
-		chmod +x "${DST_DIR}/sharun"
+	_download "$APPDIR/sharun" "$SHARUN_LINK"
+	if _is_elf "$APPDIR/sharun"; then
+		chmod +x "$APPDIR/sharun"
 	else
 		_err_msg "ERROR: What was downloaded is not sharun!"
 		_err_msg "This is usually caused by network issues"
@@ -1242,8 +1253,7 @@ _deploy_libs() {
 # lib4bin integration - library/bin deployment engine
 # ----------------------------------------------------------------------------
 
-# get destination path for libs in DST_LIB_DIR
-# $1 = file path (we resolve dirname + canonicalize internally)
+# compute destination path in DST_LIB_DIR from a source file path
 _lib4bin_get_lib_dst_dir() {
 	p=$(readlink -f "${1%/*}" | sed \
 	  -e "s|^$LIB_DIR||" \
@@ -1257,35 +1267,33 @@ _lib4bin_get_lib_dst_dir() {
 	echo "$DST_LIB_DIR"/"$p"
 }
 
-# collect direct library dependencies via ldd, new line separated entries
+# collect ldd library dependencies
 _lib4bin_collect_ldd() {
-	ret=""
+	libs=""
 	while read -r b; do
 		b=$(readlink -f "$b") || continue
 		_is_elf "$b"          || continue
 
-		ret=$(printf '%s\n%s' "$ret" "$(_lib4bin_ldd_libs "$b")")
-		case "${b##*/}" in
-			*.so|*.so.[0-9]*)
-				ret="$(printf '%s\n%s' "$ret" "$b")"
-				;;
-		esac
+		libs=$(printf '%s\n%s' "$libs" "$(_lib4bin_ldd_libs "$b")")
+		if _is_so "$b"; then
+			libs="$(printf '%s\n%s' "$libs" "$b")"
+		fi
 	done
-	printf '%s\n' "$ret" | sort -u | sed '/^$/d'
+	printf '%s\n' "$libs" | sort -u | sed '/^$/d'
 }
 
-# collect dlopen'd libraries via LD_DEBUG=libs, new line separated entries
+# collect dlopen libraries via LD_DEBUG=libs
 _lib4bin_collect_strace() {
 	[ "$STRACE_MODE" = 1 ] || return 0
 
-	ret=''
+	libs=''
 	while read -r b; do
 		b=$(readlink -f "$b")
 		_is_elf "$b" || continue
 		[ -x "$b" ]  || continue
-		case "${b##*/}" in
-			*.so|*.so.[0-9]*) continue;;
-		esac
+		if _is_so "$b"; then
+			continue
+		fi
 
 		dlopened=$TMPDIR/libs.$$
 
@@ -1303,36 +1311,35 @@ _lib4bin_collect_strace() {
 		kill -TERM $pid 2>/dev/null
 		wait $pid 2>/dev/null || :
 
-		libs=$(awk '/calling init/{print $NF}' "$dlopened" | sed \
+		out=$(awk '/calling init/{print $NF}' "$dlopened" | sed \
 		                                                     -e '/nvidia/d'      \
 		                                                     -e '/libcuda/d'     \
 		                                                     -e '/lib-dynload/d' \
 		                                                     -e '/_internal/d'
 		)
 		rm -f "$dlopened"
-		[ -n "$libs" ] || continue
-		ret=$(printf '%s\n%s' "$ret" "$libs")
+		[ -n "$out" ] || continue
+		libs=$(printf '%s\n%s' "$libs" "$out")
 	done
-	printf '%s\n' "$ret" | sort -u | sed '/^$/d'
+	printf '%s\n' "$libs" | sort -u | sed '/^$/d'
 }
 
-# Phase 2: deploy shared libraries
+# deploy shared libraries to DST_LIB_DIR
 _lib4bin_deploy_shared_libs() {
 	while read -r lib; do
-		lib_path=$(readlink -f "$lib")
-		if ! _is_elf "$lib_path" || ! ldd "$lib_path" >/dev/null 2>&1; then
+		r=$(readlink -f "$lib")
+		if ! _is_elf "$r" || ! ldd "$r" >/dev/null 2>&1; then
 			_echo "SKIPPED: [$lib] not shared object!"
 			continue
 		fi
 
-		dst_dir=$(_lib4bin_get_lib_dst_dir "$lib_path")
-
-		dst=$dst_dir/${lib_path##*/}
+		dst_dir=$(_lib4bin_get_lib_dst_dir "$r")
+		dst=$dst_dir/${r##*/}
 		mkdir -p "$dst_dir"
 		[ -f "$dst" ] || cp -fv "$lib" "$dst"
 
-		# create symlink if original name is different from lib_path name
-		if [ -L "$lib" ] && [ "${lib##*/}" != "${lib_path##*/}" ]; then
+		# create symlink for SONAME if it differs from real name
+		if [ -L "$lib" ] && [ "${lib##*/}" != "${r##*/}" ]; then
 			d=$(_lib4bin_get_lib_dst_dir "$lib")
 			mkdir -p "$d"
 			ln -sfr "$dst" "$d/${lib##*/}"
@@ -1340,99 +1347,90 @@ _lib4bin_deploy_shared_libs() {
 	done
 }
 
-# Phase 3: deploy binaries + download sharun
+# deploy binaries, download sharun if needed
 _lib4bin_deploy_binaries() {
-	seen=''
+	seen=""
 	while read -r b; do
 		b=$(readlink -f "$b")
-		if echo "$seen" | grep -Fxq "$b"; then
-			continue
-		fi
+		printf '%s\n' "$seen" | grep -Fxq "$b" && continue
 		seen=$(printf '%s\n%s' "$seen" "$b")
 
-		# scripts — deploy to bin/ with fixed shebangs
 		if _is_script "$b"; then
-			dst="${DST_DIR}/bin/${b##*/}"
-			mkdir -p "${DST_DIR}/bin"
-			[ -f "$dst" ] || { cp -fv "$b" "$dst" && chmod 755 "$dst"; }
+			dst=$DST_BIN_DIR/${b##*/}
+			mkdir -p "$DST_BIN_DIR"
+			if [ ! -f "$dst" ]; then
+				cp -fv "$b" "$dst"
+				chmod 755 "$dst"
+			fi
 			for i in python bash sh ash zsh fish dash perl ruby go node; do
-				grep -qo "^#!.*bin/$i" "$dst" && {
+				if grep -qo "^#!.*bin/$i" "$dst"; then
 					sed -i "1s|^#!.*bin/$i|#!/usr/bin/env $i|" "$dst"
 					break
-				}
+				fi
 			done
 			continue
 		fi
 
-		# skip non-ELF
 		_is_elf "$b" || continue
+		[ -x "$b" ]  || continue
+		if _is_so "$b" || _is_static "$b"; then
+			continue
+		fi
 
-		# skip shared objects (deployed by Phase 2)
-		case "${b##*/}" in *.so|*.so.*) continue ;; esac
-
-		# skip static executables
-		_is_static "$b" && continue
-
-		# skip if not an executable dynamic binary
-		[ -x "$b" ] && ldd "$b" >/dev/null 2>&1 || continue
-
-		# skip sharun itself
-		[ "$b" -ef "${DST_DIR}/sharun" ] && continue
-
-		# download sharun launcher if needed
-		[ -x "${DST_DIR}/sharun" ] || _get_sharun
+		[ -x "$APPDIR/sharun" ] || _get_sharun
 
 		_echo "...: [${b##*/}] ..."
-		mkdir -p "$__shared_dir/bin"
-		dst="$__shared_dir/bin/${b##*/}"
-		[ -f "$dst" ] || { cp -fv "$b" "$dst" && chmod 755 "$dst"; }
+		dst=$DST_SHARED_BIN_DIR/${b##*/}
+		if [ ! -f "$dst" ]; then
+			cp -fv "$b" "$dst"
+			chmod +x "$dst"
+		fi
 
 		# hardlink in bin/ -> ../sharun
-		mkdir -p "${DST_DIR}/bin"
-		(cd "${DST_DIR}/bin" && ln -f ../sharun "${b##*/}") || exit 1
+		mkdir -p "$DST_BIN_DIR" && (
+			cd "$DST_BIN_DIR"
+			ln -f ../sharun "${b##*/}"
+		) || exit 1
 	done
 }
 
-# main entry: collect + deploy everything, then run sharun -g
 _lib4bin_main() {
-	# $@ = binary paths
-	__shared_dir="${DST_DIR}/shared"
+	__shared_dir="${APPDIR}/shared"
 	[ -f "$__shared_dir" ] || [ -L "$__shared_dir" ] && __shared_dir="${__shared_dir}.dir"
-	mkdir -p "$__shared_dir" "${DST_DIR}/bin"
+	mkdir -p "$__shared_dir" "$DST_BIN_DIR" "$DST_SHARED_BIN_DIR"
 
-	# ensure shared/lib -> ../lib symlink (sharun runtime expects this)
-	if [ ! -d "${DST_DIR}/shared/lib" ] && [ ! -L "${DST_DIR}/shared/lib" ]; then
-		mkdir -p "${DST_DIR}/lib"
-		(cd "${DST_DIR}/shared" && ln -sf ../lib lib) || exit 1
+	# shared/lib -> ../lib symlink for sharun runtime
+	if [ ! -d "$__shared_dir/lib" ] && [ ! -L "$__shared_dir/lib" ]; then
+		mkdir -p "$DST_LIB_DIR"
+		(cd "$__shared_dir" && ln -sf ../lib lib) || exit 1
 	fi
-	if [ "$LIB32" = 1 ] && [ ! -d "${DST_DIR}/shared/lib32" ] && [ ! -L "${DST_DIR}/shared/lib32" ]; then
-		mkdir -p "${DST_DIR}/lib32"
-		(cd "${DST_DIR}/shared" && ln -sf ../lib32 lib32) || exit 1
+	if [ "$LIB32" = 1 ] && [ ! -d "$__shared_dir/lib32" ] && [ ! -L "$__shared_dir/lib32" ]; then
+		mkdir -p "$APPDIR/lib32"
+		(cd "$__shared_dir" && ln -sf ../lib32 lib32) || exit 1
 	fi
-
-	_binary_list="$(printf '%s\n' "$@")"
 
 	_echo "Collecting ldd libraries..."
-	_ldd_libs="$(printf '%s\n' "$@" | _lib4bin_collect_ldd)"
+	ldd_libs="$(printf '%s\n' "$@" | _lib4bin_collect_ldd)"
 
-	_echo "Collecting dlopen libraries via LD_DEBUG=libs..."
+	strace_libs=''
 	if [ "$STRACE_MODE" = 1 ]; then
-		_strace_libs="$(printf '%s\n' "$@" | _lib4bin_collect_strace)"
+		_echo "Collecting dlopen libraries via LD_DEBUG=libs..."
+		strace_libs="$(printf '%s\n' "$@" | _lib4bin_collect_strace)"
 	fi
 
-	_all_libs="$(printf '%s\n%s' "$_ldd_libs" "$_strace_libs" | sort -u | sed '/^$/d')"
+	all_libs="$(printf '%s\n%s' "$ldd_libs" "$strace_libs" | sort -u | sed '/^$/d')"
 
 	_echo "Deploying shared libraries..."
-	printf '%s\n' "$_all_libs" | _lib4bin_deploy_shared_libs
+	printf '%s\n' "$all_libs" | _lib4bin_deploy_shared_libs
 
 	_echo "Deploying binaries..."
-	printf '%s\n' "$_binary_list" | _lib4bin_deploy_binaries
+	printf '%s\n' "$@" | _lib4bin_deploy_binaries
 
-	if [ -x "${DST_DIR}/sharun" ]; then
-		_echo "Generating lib.path..."
-		"${DST_DIR}/sharun" -g
+	_echo "Generating lib.path..."
+	if [ -x "$APPDIR/sharun" ]; then
+		"$APPDIR/sharun" -g
 	else
-		_err_msg "ERROR: sharun binary not found at ${DST_DIR}/sharun!"
+		_err_msg "ERROR: sharun binary not found at $APPDIR/sharun!"
 		exit 1
 	fi
 }
