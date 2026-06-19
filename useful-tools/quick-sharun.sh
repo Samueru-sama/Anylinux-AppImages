@@ -26,7 +26,7 @@ DIRICON=$APPDIR/.DirIcon
 DST_LIB_DIR=$APPDIR/lib
 MAIN_BIN=${MAIN_BIN##*/}
 
-SHARUN_LINK=${SHARUN_LINK:-https://github.com/pkgforge-dev/sharun/releases/latest/download/sharun-$APPIMAGE_ARCH-aio}
+SHARUN_LINK=${SHARUN_LINK:-https://github.com/pkgforge-dev/sharun/releases/latest/download/sharun-$APPIMAGE_ARCH}
 ONELF_LINK=${ONELF_LINK:-https://github.com/QaidVoid/onelf/releases/latest/download/onelf-$APPIMAGE_ARCH-linux}
 HOOKSRC=${HOOKSRC:-https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/refs/heads/main/useful-tools/hooks}
 LD_PRELOAD_OPEN=${LD_PRELOAD_OPEN:-https://github.com/VHSgunzo/pathmap.git}
@@ -129,10 +129,24 @@ _is_cmd() {
 }
 
 _is_elf() {
-	if [ -f "$1" ] && head -c 4 "$1" | grep -qa 'ELF'; then
-		return 0
+	head -c 4 "$1" | grep -qa 'ELF'
+}
+
+_is_static() {
+	if _is_elf "$1"; then
+		ldd "$1" 2>/dev/null | grep -qi 'statically linked\|not a dynamic'
+	else
+		return 1
 	fi
-	return 1
+}
+
+_is_script() {
+	shebang=$(head -c 2 "$1" 2>/dev/null)
+	[ "$shebang" = '#!' ]
+}
+
+_lib4bin_ldd_libs() {
+	ldd "$1" 2>/dev/null | awk '/=>/{print $3}' | sort -u
 }
 
 _download() {
@@ -1201,34 +1215,285 @@ _make_deployment_array() {
 }
 
 _get_sharun() {
-	if [ ! -x "$TMPDIR"/sharun-aio ]; then
-		_echo "Downloading sharun..."
-		_download "$TMPDIR"/sharun-aio "$SHARUN_LINK"
-		if head -c 4 "$TMPDIR"/sharun-aio | grep -qa 'ELF'; then
-			chmod +x "$TMPDIR"/sharun-aio
-		else
-			_err_msg "ERROR: What was downloaded is not sharun!"
-			_err_msg "This is usually caused by network issues"
-			exit 1
-		fi
+	if [ -x "${DST_DIR}/sharun" ]; then
+		return 0
+	fi
+	_echo "Downloading sharun..."
+	_download "${DST_DIR}/sharun" "$SHARUN_LINK"
+	if _is_elf "${DST_DIR}/sharun"; then
+		chmod +x "${DST_DIR}/sharun"
+	else
+		_err_msg "ERROR: What was downloaded is not sharun!"
+		_err_msg "This is usually caused by network issues"
+		exit 1
 	fi
 }
 
 _deploy_libs() {
-	# when strace args are given sharun will only use them when
-	# you pass a single binary to it that is:
-	# 'sharun-aio l /path/to/bin -- google.com' works (site is opened)
-	# 'sharun-aio l /path/to/lib /path/to/bin -- google.com' does not work
-	if [ "$STRACE_ARGS_PROVIDED" = 1 ]; then
-		$XVFB_CMD "$TMPDIR"/sharun-aio l "$@"
+	# merge deployment array with user-provided binaries
+	eval set -- "$TO_DEPLOY_ARRAY" "$@"
+
+	# run the embedded lib4bin deployment engine
+	_lib4bin_main "$@"
+}
+
+# ----------------------------------------------------------------------------
+# lib4bin integration - library/bin deployment engine
+# ----------------------------------------------------------------------------
+
+# compute destination path for a library in the shared/ tree
+_lib4bin_get_lib_dst_dir() {
+	# $1 = dst_dir_pth  $2 = lib_dir  $3 = lib_src_dirname_pth
+	printf '%s\n' "$3" | \
+	sed -E "s|$DST_DIR||;s|/shared||;s|^/usr||;s|^/opt||;s|^/lib(64\|32)?||;s|^/[^/]*-linux-gnu||" | \
+	while read -r _res
+		do echo "${1}/${2}${_res}"
+	done
+}
+
+# collect direct library dependencies via ldd
+_lib4bin_collect_ldd() {
+	# stdin = newline-separated binary list
+	# stdout = newline-separated library paths
+	ALL_LIBS=''
+	while read -r binary; do
+		[ -z "$binary" ] && continue
+		binary_src_pth="$binary"
+		[ -L "$binary" ] && binary_src_pth="$(readlink -f "$binary")"
+		binary_name="$(basename "$binary")"
+		[ "$binary" = 'sharun' ] && binary_src_pth="$DST_DIR/sharun"
+		if _is_elf "$binary_src_pth"; then
+			ALL_LIBS="$(printf '%s\n%s' "$ALL_LIBS" "$(_lib4bin_ldd_libs "$binary_src_pth")")"
+			case "$binary_name" in
+				*.so|*.so.[0-9]*) ALL_LIBS="$(printf '%s\n%s' "$ALL_LIBS" "$binary")" ;;
+			esac
+		fi
+	done
+	printf '%s\n' "$ALL_LIBS" | sort -u | sed '/^$/d'
+}
+
+# collect dlopen'd libraries via LD_DEBUG=libs
+_lib4bin_collect_strace() {
+	# stdin = newline-separated binary list
+	# stdout = newline-separated library paths
+	[ "$STRACE_MODE" != 1 ] && return 0
+
+	ALL_STRLIBS=''
+	while read -r binary; do
+		[ -z "$binary" ] && continue
+		binary_src_pth="$binary"
+		[ -L "$binary" ] && binary_src_pth="$(readlink -f "$binary")"
+		binary_name="$(basename "$binary")"
+		case "$binary_name" in
+			*.so|*.so.[0-9]*) continue ;;
+		esac
+		[ "$binary" = 'sharun' ] && continue
+		if _is_elf "$binary_src_pth" && [ -x "$binary_src_pth" ]; then
+			b="$(readlink -f "$binary_src_pth")"
+			dlopened_libs="${TMPDIR:-/tmp}/libs.$$"
+
+			_echo "STRACE: [$b] ..."
+			if [ -n "$XVFB_CMD" ]; then
+				$XVFB_CMD env LD_DEBUG=libs "$b" >/dev/null 2>"$dlopened_libs" &
+			else
+				LD_DEBUG=libs "$b" >/dev/null 2>"$dlopened_libs" &
+			fi
+			pid=$!
+
+			sleep "${STRACE_TIME:-5}"
+			kill -TERM $pid 2>/dev/null
+			wait $pid 2>/dev/null || :
+
+			_strace_libs=$(
+				awk '/calling init/{print $NF}' "$dlopened_libs" 2>/dev/null \
+				   | sed \
+				        -e '/nvidia/d'      \
+				        -e '/libcuda/d'     \
+				        -e '/lib-dynload/d' \
+				        -e '/_internal/d'
+			)
+			rm -f "$dlopened_libs"
+
+			if [ -n "$_strace_libs" ]; then
+				ALL_STRLIBS="$(printf '%s\n%s' "$ALL_STRLIBS" "$_strace_libs")"
+			fi
+		fi
+	done
+	printf '%s\n' "$ALL_STRLIBS" | sort -u | sed '/^$/d'
+}
+
+# Phase 2: deploy shared libraries
+_lib4bin_deploy_shared_libs() {
+	# stdin = newline-separated library paths
+	while read -r lib_src_pth; do
+		[ -z "$lib_src_pth" ] && continue
+		unset lib_src_real_pth lib_src_real_name IS_SHARED_OBJ
+		if [ -L "$lib_src_pth" ]; then
+			lib_src_real_pth="$(readlink -f "$lib_src_pth")"
+			lib_src_real_name="$(basename "$lib_src_real_pth")"
+			lib_src_dirname_pth="$(readlink -f "$(dirname "$lib_src_real_pth")")"
+			if _is_elf "$lib_src_real_pth" && ldd "$lib_src_real_pth" >/dev/null 2>&1; then
+				IS_SHARED_OBJ=1
+			fi
+		else
+			lib_src_dirname_pth="$(readlink -f "$(dirname "$lib_src_pth")")"
+			if _is_elf "$lib_src_pth" && ldd "$lib_src_pth" >/dev/null 2>&1; then
+				IS_SHARED_OBJ=1
+			fi
+		fi
+		if [ -n "$IS_SHARED_OBJ" ]; then
+			lib_src_name="$(basename "$lib_src_pth")"
+			printf '%s\n' "$lib_src_dirname_pth" | grep -qE '/lib32|/i386-linux-gnu|/arm-linux-gnu' && lib_dir="lib32"||lib_dir="lib"
+			mkdir -p "${DST_DIR}/${lib_dir}" || exit 1
+			if [ ! -d "${DST_DIR}/shared/${lib_dir}" ] && [ ! -L "${DST_DIR}/shared/${lib_dir}" ]; then
+				(cd "$DST_DIR/shared" && [ -L "$lib_dir" ] || ln -sf "../${lib_dir}" "$lib_dir")||exit 1
+			fi
+			lib_dst_dir_pth="$(_lib4bin_get_lib_dst_dir "$__dst_dir_pth" "$lib_dir" "$lib_src_dirname_pth")"
+			[ -n "$lib_src_real_name" ] && lib_dst_pth="$lib_dst_dir_pth/$lib_src_real_name"||lib_dst_pth="$lib_dst_dir_pth/$lib_src_name"
+			mkdir -p "$lib_dst_dir_pth" || exit 1
+			[ -f "$lib_dst_pth" ] || { cp -fv "$lib_src_pth" "$lib_dst_pth" && chmod 755 "$lib_dst_pth"; } || exit 1
+			if [ -n "$lib_src_real_name" ] && [ "$lib_src_name" != "$lib_src_real_name" ]; then
+				_sym_dst_dir="$(_lib4bin_get_lib_dst_dir "$__dst_dir_pth" "$lib_dir" "$(readlink -f "$(dirname "$lib_src_pth")")")"
+				mkdir -p "$_sym_dst_dir" || exit 1
+				ln -sfr "$lib_dst_dir_pth/$lib_src_real_name" "$_sym_dst_dir/$lib_src_name" || exit 1
+			fi
+		else
+			_echo "SKIPPED: [$lib_src_pth] not shared object!"
+		fi
+	done
+}
+
+# Phase 3: deploy binaries + download sharun
+_lib4bin_deploy_binaries() {
+	# stdin = newline-separated binary paths
+	BINARIES=''
+	while read -r binary; do
+		[ -z "$binary" ] && continue
+		printf '%s\n' "$BINARIES" | grep -Fxq "$binary" && continue
+		unset binary_real_name
+		if [ -L "$binary" ]; then
+			binary_src_pth="$(readlink -f "$binary")"
+			binary_real_name="$(basename "$binary_src_pth")"
+		else
+			binary_src_pth="$binary"
+		fi
+		binary_name="$(basename "$binary")"
+		binary_readlink_name="$(basename "$(readlink "$binary")")"
+		[ "$binary" = 'sharun' ] && binary_src_pth="$DST_DIR/sharun"
+		unset IS_ELF IS_STATIC IS_SCRIPT IS_SO IS_EXECUTABLE
+		if _is_elf "$binary_src_pth"; then
+			IS_ELF="ELF"
+			case "$binary_name" in
+				*.so|*.so.*) IS_SO="shared object" ;;
+			esac
+			if [ -z "$IS_SO" ]; then
+				if [ -x "$binary_src_pth" ]; then
+					IS_EXECUTABLE="executable"
+					_is_static "$binary_src_pth" && IS_STATIC="static"
+				elif _is_static "$binary_src_pth"; then
+					IS_EXECUTABLE="executable"
+					IS_STATIC="static"
+				elif ldd "$binary_src_pth" >/dev/null 2>&1; then
+					IS_SO="shared object"
+				else
+					IS_EXECUTABLE="executable"
+					IS_STATIC="static"
+				fi
+			fi
+		else
+			_is_script "$binary_src_pth" && IS_SCRIPT="script"
+		fi
+		if [ -z "$IS_EXECUTABLE" ] && [ -z "$IS_SCRIPT" ] && [ -z "$IS_SO" ]; then
+			if [ -e "$binary_src_pth" ]; then
+				_echo "SKIPPED: [$binary] not executable or shared object!"
+			else
+				[ "$STRACE_EXE" = "$binary" ] && { _err_msg "[$binary] executable for strace not found!"; exit 1; }
+				_echo "SKIPPED: [$binary] not found!"
+			fi
+			BINARIES="$(printf '%s\n%s' "$BINARIES" "$binary")"
+			continue
+		fi
+		IS_SHARUN="$(find "$binary_src_pth" -xdev -samefile "${DST_DIR}/sharun" 2>/dev/null)"
+		bin_dir_pth="${_dst_dir_pth}/bin"
+		if [ -n "$IS_SCRIPT" ]; then
+			bin_dir_pth="$__sharun_bin_dir_pth"
+			mkdir -p "$bin_dir_pth" || exit 1
+			[ -n "$binary_real_name" ] && binary_dst_pth="$bin_dir_pth/$binary_real_name"||binary_dst_pth="$bin_dir_pth/$binary_name"
+			[ -f "$binary_dst_pth" ] || { cp -fv "$binary_src_pth" "$binary_dst_pth" && chmod 755 "$binary_dst_pth"; } || exit 1
+			for intep in python bash sh ash zsh fish dash perl ruby go node; do
+				if grep -qo "^#!.*bin/$intep" "$binary_dst_pth"; then
+					sed -i "1s|^#!.*bin/$intep|#!/usr/bin/env $intep|" "$binary_dst_pth"
+					break
+				fi
+			done
+			BINARIES="$(printf '%s\n%s' "$BINARIES" "$binary")"
+			continue
+		fi
+		[ -n "$IS_SO" ] && { BINARIES="$(printf '%s\n%s' "$BINARIES" "$binary")"; continue; }
+		_echo "...: [$binary_name] ..."
+		# Regular executable
+		if [ "$binary_name" != 'sharun' ] && [ "$binary_readlink_name" != 'sharun' ]; then
+			if [ "$binary_real_name" != 'sharun' ] && [ -z "$IS_SHARUN" ]; then
+				if [ ! -x "${DST_DIR}/sharun" ]; then
+					_get_sharun
+				fi
+			fi
+			mkdir -p "$bin_dir_pth" || exit 1
+			[ -n "$binary_real_name" ] && binary_dst_pth="$bin_dir_pth/$binary_real_name"||binary_dst_pth="$bin_dir_pth/$binary_name"
+			[ -f "$binary_dst_pth" ] || { cp -fv "$binary_src_pth" "$binary_dst_pth" && chmod 755 "$binary_dst_pth"; } || exit 1
+			BINARIES="$(printf '%s\n%s' "$BINARIES" "$binary_dst_pth")"
+			if [ -n "$binary_real_name" ] && [ "$binary_name" != "$binary_real_name" ]; then
+				(cd "$bin_dir_pth" && [ -L "$binary_name" ] || ln -sf "$binary_real_name" "$binary_name")||exit 1
+			fi
+			# bin/ -> ../sharun hardlink
+			mkdir -p "$__sharun_bin_dir_pth" || exit 1
+			(cd "$__sharun_bin_dir_pth"
+			ln -f ../sharun "$binary_name"||exit 1
+			if [ -n "$binary_real_name" ]
+				then ln -f ../sharun "$binary_real_name"||exit 1
+			fi)||exit 1
+		fi
+		BINARIES="$(printf '%s\n%s' "$BINARIES" "$binary")"
+	done
+	BINARIES=''
+}
+
+# main entry: collect + deploy everything, then run sharun -g
+_lib4bin_main() {
+	# $@ = binary paths
+	__dst_dir_pth="${DST_DIR}/shared"
+	__sharun_bin_dir_pth="${DST_DIR}/bin"
+	[ -f "$__dst_dir_pth" ] || [ -L "$__dst_dir_pth" ] && __dst_dir_pth="${__dst_dir_pth}.dir"
+	mkdir -p "${DST_DIR}/shared" "$__sharun_bin_dir_pth" || exit 1
+
+	_binary_list="$(printf '%s\n' "$@")"
+
+	_echo "Collecting ldd libraries..."
+	_ldd_libs="$(printf '%s\n' "$@" | _lib4bin_collect_ldd)"
+
+	_echo "Collecting dlopen libraries via LD_DEBUG=libs..."
+	if [ "$STRACE_MODE" = 1 ]; then
+		_strace_libs="$(printf '%s\n' "$@" | _lib4bin_collect_strace)"
 	fi
 
-	# now merge the deployment array
-	ARRAY=$(_save_array "$@")
-	eval set -- "$TO_DEPLOY_ARRAY" "$ARRAY"
+	_all_libs="$(printf '%s\n%s' "$_ldd_libs" "$_strace_libs" | sort -u | sed '/^$/d')"
 
-	$XVFB_CMD "$TMPDIR"/sharun-aio l "$@"
+	_echo "Deploying shared libraries..."
+	printf '%s\n' "$_all_libs" | _lib4bin_deploy_shared_libs
+
+	_echo "Deploying binaries..."
+	printf '%s\n' "$_binary_list" | _lib4bin_deploy_binaries
+
+	if [ -x "${DST_DIR}/sharun" ]; then
+		_echo "Generating lib.path..."
+		"${DST_DIR}/sharun" -g
+	else
+		_err_msg "ERROR: sharun binary not found at ${DST_DIR}/sharun!"
+		exit 1
+	fi
 }
+
+# ----------------------------------------------------------------------------
 
 _handle_bins_scripts() {
 	# check for gstreamer binaries these need to be in the gstreamer libdir
