@@ -1311,7 +1311,7 @@ _lib4bin_collect_strace() {
 		)
 		rm -f "$dlopened"
 		[ -n "$libs" ] || continue
-		ret="$(printf '%s\n%s' "$ret" "$libs")"
+		ret=$(printf '%s\n%s' "$ret" "$libs")
 	done
 	printf '%s\n' "$ret" | sort -u | sed '/^$/d'
 }
@@ -1342,106 +1342,63 @@ _lib4bin_deploy_shared_libs() {
 
 # Phase 3: deploy binaries + download sharun
 _lib4bin_deploy_binaries() {
-	# stdin = newline-separated binary paths
-	BINARIES=''
-	while read -r binary; do
-		[ -z "$binary" ] && continue
-		printf '%s\n' "$BINARIES" | grep -Fxq "$binary" && continue
-		unset binary_real_name
-		if [ -L "$binary" ]; then
-			binary_src_pth="$(readlink -f "$binary")"
-			binary_real_name="$(basename "$binary_src_pth")"
-		else
-			binary_src_pth="$binary"
-		fi
-		binary_name="$(basename "$binary")"
-		binary_readlink_name="$(basename "$(readlink "$binary")")"
-		[ "$binary" = 'sharun' ] && binary_src_pth="$DST_DIR/sharun"
-		unset IS_ELF IS_STATIC IS_SCRIPT IS_SO IS_EXECUTABLE
-		if _is_elf "$binary_src_pth"; then
-			IS_ELF="ELF"
-			case "$binary_name" in
-				*.so|*.so.*) IS_SO="shared object" ;;
-			esac
-			if [ -z "$IS_SO" ]; then
-				if [ -x "$binary_src_pth" ]; then
-					IS_EXECUTABLE="executable"
-					_is_static "$binary_src_pth" && IS_STATIC="static"
-				elif _is_static "$binary_src_pth"; then
-					IS_EXECUTABLE="executable"
-					IS_STATIC="static"
-				elif ldd "$binary_src_pth" >/dev/null 2>&1; then
-					IS_SO="shared object"
-				else
-					IS_EXECUTABLE="executable"
-					IS_STATIC="static"
-				fi
-			fi
-		else
-			_is_script "$binary_src_pth" && IS_SCRIPT="script"
-		fi
-		if [ -z "$IS_EXECUTABLE" ] && [ -z "$IS_SCRIPT" ] && [ -z "$IS_SO" ]; then
-			if [ -e "$binary_src_pth" ]; then
-				_echo "SKIPPED: [$binary] not executable or shared object!"
-			else
-				[ "$STRACE_EXE" = "$binary" ] && { _err_msg "[$binary] executable for strace not found!"; exit 1; }
-				_echo "SKIPPED: [$binary] not found!"
-			fi
-			BINARIES="$(printf '%s\n%s' "$BINARIES" "$binary")"
+	seen=''
+	while read -r b; do
+		b=$(readlink -f "$b")
+		if echo "$seen" | grep -Fxq "$b"; then
 			continue
 		fi
-		IS_SHARUN="$(find "$binary_src_pth" -xdev -samefile "${DST_DIR}/sharun" 2>/dev/null)"
-		bin_dir_pth="${_dst_dir_pth}/bin"
-		if [ -n "$IS_SCRIPT" ]; then
-			bin_dir_pth="$__sharun_bin_dir_pth"
-			mkdir -p "$bin_dir_pth" || exit 1
-			[ -n "$binary_real_name" ] && binary_dst_pth="$bin_dir_pth/$binary_real_name"||binary_dst_pth="$bin_dir_pth/$binary_name"
-			[ -f "$binary_dst_pth" ] || { cp -fv "$binary_src_pth" "$binary_dst_pth" && chmod 755 "$binary_dst_pth"; } || exit 1
-			for intep in python bash sh ash zsh fish dash perl ruby go node; do
-				if grep -qo "^#!.*bin/$intep" "$binary_dst_pth"; then
-					sed -i "1s|^#!.*bin/$intep|#!/usr/bin/env $intep|" "$binary_dst_pth"
+		seen=$(printf '%s\n%s' "$seen" "$b")
+
+		# scripts — deploy to bin/ with fixed shebangs
+		if _is_script "$b"; then
+			dst="${DST_DIR}/bin/${b##*/}"
+			mkdir -p "${DST_DIR}/bin"
+			[ -f "$dst" ] || { cp -fv "$b" "$dst" && chmod 755 "$dst"; }
+			for i in python bash sh ash zsh fish dash perl ruby go node; do
+				grep -qo "^#!.*bin/$i" "$dst" && {
+					sed -i "1s|^#!.*bin/$i|#!/usr/bin/env $i|" "$dst"
 					break
-				fi
+				}
 			done
-			BINARIES="$(printf '%s\n%s' "$BINARIES" "$binary")"
 			continue
 		fi
-		[ -n "$IS_SO" ] && { BINARIES="$(printf '%s\n%s' "$BINARIES" "$binary")"; continue; }
-		_echo "...: [$binary_name] ..."
-		# Regular executable
-		if [ "$binary_name" != 'sharun' ] && [ "$binary_readlink_name" != 'sharun' ]; then
-			if [ "$binary_real_name" != 'sharun' ] && [ -z "$IS_SHARUN" ]; then
-				if [ ! -x "${DST_DIR}/sharun" ]; then
-					_get_sharun
-				fi
-			fi
-			mkdir -p "$bin_dir_pth" || exit 1
-			[ -n "$binary_real_name" ] && binary_dst_pth="$bin_dir_pth/$binary_real_name"||binary_dst_pth="$bin_dir_pth/$binary_name"
-			[ -f "$binary_dst_pth" ] || { cp -fv "$binary_src_pth" "$binary_dst_pth" && chmod 755 "$binary_dst_pth"; } || exit 1
-			BINARIES="$(printf '%s\n%s' "$BINARIES" "$binary_dst_pth")"
-			if [ -n "$binary_real_name" ] && [ "$binary_name" != "$binary_real_name" ]; then
-				(cd "$bin_dir_pth" && [ -L "$binary_name" ] || ln -sf "$binary_real_name" "$binary_name")||exit 1
-			fi
-			# bin/ -> ../sharun hardlink
-			mkdir -p "$__sharun_bin_dir_pth" || exit 1
-			(cd "$__sharun_bin_dir_pth"
-			ln -f ../sharun "$binary_name"||exit 1
-			if [ -n "$binary_real_name" ]
-				then ln -f ../sharun "$binary_real_name"||exit 1
-			fi)||exit 1
-		fi
-		BINARIES="$(printf '%s\n%s' "$BINARIES" "$binary")"
+
+		# skip non-ELF
+		_is_elf "$b" || continue
+
+		# skip shared objects (deployed by Phase 2)
+		case "${b##*/}" in *.so|*.so.*) continue ;; esac
+
+		# skip static executables
+		_is_static "$b" && continue
+
+		# skip if not an executable dynamic binary
+		[ -x "$b" ] && ldd "$b" >/dev/null 2>&1 || continue
+
+		# skip sharun itself
+		[ "$b" -ef "${DST_DIR}/sharun" ] && continue
+
+		# download sharun launcher if needed
+		[ -x "${DST_DIR}/sharun" ] || _get_sharun
+
+		_echo "...: [${b##*/}] ..."
+		mkdir -p "$__shared_dir/bin"
+		dst="$__shared_dir/bin/${b##*/}"
+		[ -f "$dst" ] || { cp -fv "$b" "$dst" && chmod 755 "$dst"; }
+
+		# hardlink in bin/ -> ../sharun
+		mkdir -p "${DST_DIR}/bin"
+		(cd "${DST_DIR}/bin" && ln -f ../sharun "${b##*/}") || exit 1
 	done
-	BINARIES=''
 }
 
 # main entry: collect + deploy everything, then run sharun -g
 _lib4bin_main() {
 	# $@ = binary paths
-	__dst_dir_pth="${DST_DIR}/shared"
-	__sharun_bin_dir_pth="${DST_DIR}/bin"
-	[ -f "$__dst_dir_pth" ] || [ -L "$__dst_dir_pth" ] && __dst_dir_pth="${__dst_dir_pth}.dir"
-	mkdir -p "${DST_DIR}/shared" "$__sharun_bin_dir_pth"
+	__shared_dir="${DST_DIR}/shared"
+	[ -f "$__shared_dir" ] || [ -L "$__shared_dir" ] && __shared_dir="${__shared_dir}.dir"
+	mkdir -p "$__shared_dir" "${DST_DIR}/bin"
 
 	# ensure shared/lib -> ../lib symlink (sharun runtime expects this)
 	if [ ! -d "${DST_DIR}/shared/lib" ] && [ ! -L "${DST_DIR}/shared/lib" ]; then
