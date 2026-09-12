@@ -215,7 +215,6 @@ if [ "$COMMON_PACKAGES" = 1 ]; then
 	set -- "$@" \
 		icu-mini         \
 		opus-mini        \
-		libxml2-mini     \
 		qt6-base-mini    \
 		gtk3-mini        \
 		gtk4-mini        \
