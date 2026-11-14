@@ -1970,9 +1970,9 @@ _stub_reloc_ok() {
 }
 
 _stub_sndfile() {
-	[ "$LIBSNDFILE_STUB" != 0 ] || return 1
-	[ -f "$STUB_DIR"/libsndfile.so.1 ] || return 1
-	if [ "$LIBSNDFILE_STUB" != 1 ]; then
+	if [ "$LIBSNDFILE_STUB" = 0 ] || [ ! -f "$STUB_DIR"/libsndfile.so.1 ]; then
+		return 1
+	elif [ "$LIBSNDFILE_STUB" != 1 ]; then
 		_stub_only_pulse "$@" || return 1
 	fi
 	sndfile_users=$(_stub_users libsndfile.so.1 "$@")
@@ -1980,8 +1980,10 @@ _stub_sndfile() {
 }
 
 _stub_systemd() {
-	[ "$LIBSYSTEMD_STUB" = 1 ] || return 1
-	[ -f "$STUB_DIR"/libsystemd.so.0 ] || return 1
+	# systemd has no automatic detection, use must opt in via LIBSYSTEMD_STUB=1
+	if [ "$LIBSYSTEMD_STUB" != 1 ] || [ ! -f "$STUB_DIR"/libsystemd.so.0 ]; then
+		return 1
+	fi
 	systemd_users=$(_stub_users libsystemd.so.0 "$@")
 	[ -n "$systemd_users" ]
 }
@@ -1990,12 +1992,8 @@ _stubs_enable() {
 	use_sndfile_stub=0
 	use_systemd_stub=0
 
-	if _stub_sndfile "$@"; then
-		use_sndfile_stub=1
-	fi
-	if _stub_systemd "$@"; then
-		use_systemd_stub=1
-	fi
+	if _stub_sndfile "$@"; then use_sndfile_stub=1; fi
+	if _stub_systemd "$@"; then use_systemd_stub=1; fi
 
 	if [ "$use_sndfile_stub" = 0 ] && [ "$use_systemd_stub" = 0 ]; then
 		return 0
@@ -2011,24 +2009,30 @@ _stubs_enable() {
 		cp -f "$STUB_DIR"/libsystemd.so.0 "$stub_ld_dir"/
 	fi
 
-	stub_old_ld=$LD_LIBRARY_PATH
-	export LD_LIBRARY_PATH="$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-	if [ "$use_sndfile_stub" = 1 ] && ! _stub_reloc_ok sf_ $sndfile_users; then
+	# check the stubs provide all the needed symbols
+	if [ "$use_sndfile_stub" = 1 ] && ! (
+		LD_LIBRARY_PATH=$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+		export LD_LIBRARY_PATH
+		_stub_reloc_ok sf_ $sndfile_users
+	); then
 		use_sndfile_stub=0
 		rm -f "$stub_ld_dir"/libsndfile.so.1
 	fi
-	if [ "$use_systemd_stub" = 1 ] && ! _stub_reloc_ok sd_ $systemd_users; then
+	if [ "$use_systemd_stub" = 1 ] && ! (
+		LD_LIBRARY_PATH=$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+		export LD_LIBRARY_PATH
+		_stub_reloc_ok sd_ $systemd_users
+	); then
 		use_systemd_stub=0
 		rm -f "$stub_ld_dir"/libsystemd.so.0
 	fi
 
-	if [ "$use_sndfile_stub" = 0 ] && [ "$use_systemd_stub" = 0 ]; then
-		if [ -n "$stub_old_ld" ]; then
-			export LD_LIBRARY_PATH="$stub_old_ld"
-		else
-			unset LD_LIBRARY_PATH
-		fi
+	# only expose the staging dir if at least one stub survived
+	if [ "$use_sndfile_stub" = 1 ] || [ "$use_systemd_stub" = 1 ]; then
+		stub_old_ld=$LD_LIBRARY_PATH
+		LD_LIBRARY_PATH=$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+		export LD_LIBRARY_PATH
+	else
 		rm -rf "$stub_ld_dir"
 		stub_ld_dir=
 	fi
