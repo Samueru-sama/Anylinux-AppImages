@@ -1997,7 +1997,9 @@ _stub_systemd() {
 }
 
 _stubs_enable() {
-	if ! _stub_sndfile "$@" && ! _stub_systemd "$@"; then
+	_stub_sndfile "$@" || :
+	_stub_systemd "$@" || :
+	if [ "$use_sndfile_stub" = 0 ] && [ "$use_systemd_stub" = 0 ]; then
 		return 0
 	fi
 
