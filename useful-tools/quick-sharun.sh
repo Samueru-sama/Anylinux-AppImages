@@ -2027,8 +2027,7 @@ _stubs_enable() {
 
 _stubs_finish() {
 	mkdir -p "$DST_LIB_DIR"
-	if [ "$use_sndfile_stub" = 1 ]; then
-		rm -f "$DST_LIB_DIR"/libsndfile.so.1*
+	if [ "$use_sndfile_stub" = 1 ] && [ ! -e "$DST_LIB_DIR"/libsndfile.so.1 ]; then
 		cp -f "$stub_ld_dir"/libsndfile.so.1 "$DST_LIB_DIR"/libsndfile.so.1
 		if [ "$LIBSNDFILE_STUB" = 1 ]; then
 			_echo "* using the libsndfile stub (LIBSNDFILE_STUB=1)"
@@ -2036,8 +2035,7 @@ _stubs_finish() {
 			_echo "* using the libsndfile stub (only libpulsecommon needs it)"
 		fi
 	fi
-	if [ "$use_systemd_stub" = 1 ]; then
-		rm -f "$DST_LIB_DIR"/libsystemd.so.0*
+	if [ "$use_systemd_stub" = 1 ] && [ ! -e "$DST_LIB_DIR"/libsystemd.so.0 ]; then
 		cp -f "$stub_ld_dir"/libsystemd.so.0 "$DST_LIB_DIR"/libsystemd.so.0
 		_echo "* using the libsystemd stub (LIBSYSTEMD_STUB=1)"
 	fi
