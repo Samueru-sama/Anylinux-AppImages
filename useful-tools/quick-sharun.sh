@@ -1933,18 +1933,22 @@ _lib4bin_collect_strace() {
 
 # dummy libsystemd/libsndfile from the sharun helper tarball
 
-# 0 when libpulsecommon (or libpulse) is the only deployed user of libsndfile
-_stub_only_pulse() {
+# check if pulseaudio is the only user that depends on libsndfile
+# in that case we can automatically deploy the libsndfile stub and get rid of
+# several transitive dependencies, pulseaudio clients do not need libsndfile
+_is_pulse_the_only_user_of_sndfile() {
 	found=0
-	for f in $ldd_libs "$@"; do
-		patchelf --print-needed "$f" 2>/dev/null | grep -qx libsndfile.so.1 || continue
-		found=1
-		case "${f##*/}" in
-			libpulsecommon*|libpulse.so*) ;;
-			*) return 1;;
-		esac
+	set -- $ldd_libs "$@"
+	for f do
+		if patchelf --print-needed "$f" 2>/dev/null | grep -qx libsndfile.so.1; then
+			found=1
+			case "${f##*/}" in
+				libpulsecommon*|libpulse.so*) ;;
+				*) return 1;;
+			esac
+		fi
 	done
-	[ "$found" = 1 ]
+	[ "$found" = 1 ] || return 1
 }
 
 # files in the deployment set that need a given soname
@@ -1958,8 +1962,8 @@ _stub_users() {
 	done
 }
 
-# 0 when none of the given files has an unresolved stub symbol
-_stub_reloc_ok() {
+# check the stubs provide all the needed symbols via ldd -r
+_check_stub_symbols() {
 	prefix=$1
 	shift
 	for f do
@@ -1970,61 +1974,58 @@ _stub_reloc_ok() {
 }
 
 _stub_sndfile() {
+	use_sndfile_stub=0
 	if [ "$LIBSNDFILE_STUB" = 0 ] || [ ! -f "$STUB_DIR"/libsndfile.so.1 ]; then
 		return 1
 	elif [ "$LIBSNDFILE_STUB" != 1 ]; then
-		_stub_only_pulse "$@" || return 1
+		_is_pulse_the_only_user_of_sndfile "$@" || return 1
 	fi
 	sndfile_users=$(_stub_users libsndfile.so.1 "$@")
-	[ -n "$sndfile_users" ]
+	[ -n "$sndfile_users" ] || return 1
+	use_sndfile_stub=1
 }
 
 _stub_systemd() {
+	use_systemd_stub=0
 	# systemd has no automatic detection, use must opt in via LIBSYSTEMD_STUB=1
 	if [ "$LIBSYSTEMD_STUB" != 1 ] || [ ! -f "$STUB_DIR"/libsystemd.so.0 ]; then
 		return 1
 	fi
 	systemd_users=$(_stub_users libsystemd.so.0 "$@")
-	[ -n "$systemd_users" ]
+	[ -n "$systemd_users" ] || return 1
+	use_systemd_stub=1
 }
 
 _stubs_enable() {
-	use_sndfile_stub=0
-	use_systemd_stub=0
-
-	if _stub_sndfile "$@"; then use_sndfile_stub=1; fi
-	if _stub_systemd "$@"; then use_systemd_stub=1; fi
-
-	if [ "$use_sndfile_stub" = 0 ] && [ "$use_systemd_stub" = 0 ]; then
+	if ! _stub_sndfile "$@" && ! _stub_systemd "$@"; then
 		return 0
 	fi
 
 	stub_ld_dir=$TMPDIR/.qs-stubs.$$
+	_ld_path=$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 	rm -rf "$stub_ld_dir"
 	mkdir -p "$stub_ld_dir"
+
 	if [ "$use_sndfile_stub" = 1 ]; then
-		cp -f "$STUB_DIR"/libsndfile.so.1 "$stub_ld_dir"/
+		cp -f "$STUB_DIR"/libsndfile.so.1 "$stub_ld_dir"
 	fi
 	if [ "$use_systemd_stub" = 1 ]; then
-		cp -f "$STUB_DIR"/libsystemd.so.0 "$stub_ld_dir"/
+		cp -f "$STUB_DIR"/libsystemd.so.0 "$stub_ld_dir"
 	fi
 
-	# check the stubs provide all the needed symbols
-	if [ "$use_sndfile_stub" = 1 ] && ! (
-		LD_LIBRARY_PATH=$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-		export LD_LIBRARY_PATH
-		_stub_reloc_ok sf_ $sndfile_users
-	); then
-		use_sndfile_stub=0
-		rm -f "$stub_ld_dir"/libsndfile.so.1
+	if [ "$use_sndfile_stub" = 1 ]; then
+		# check the stubs provide all the needed symbols
+		if ! LD_LIBRARY_PATH=$_ld_path _check_stub_symbols sf_ $sndfile_users; then
+			use_sndfile_stub=0
+			rm -f "$stub_ld_dir"/libsndfile.so.1
+		fi
 	fi
-	if [ "$use_systemd_stub" = 1 ] && ! (
-		LD_LIBRARY_PATH=$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-		export LD_LIBRARY_PATH
-		_stub_reloc_ok sd_ $systemd_users
-	); then
-		use_systemd_stub=0
-		rm -f "$stub_ld_dir"/libsystemd.so.0
+	if [ "$use_systemd_stub" = 1 ]; then
+		# check the stubs provide all the needed symbols
+		if ! LD_LIBRARY_PATH=$_ld_path _check_stub_symbols sd_ $systemd_users; then
+			use_systemd_stub=0
+			rm -f "$stub_ld_dir"/libsystemd.so.0
+		fi
 	fi
 
 	# only expose the staging dir if at least one stub survived
