@@ -2186,7 +2186,6 @@ _lib4bin_main() {
 	ldd_libs=$(_lib4bin_collect_ldd "$@")
 
 	if _stubs_enable "$@"; then
-		_echo "Collecting dependencies again with the dummy libraries..."
 		ldd_libs=$(_lib4bin_collect_ldd "$@")
 	fi
 
