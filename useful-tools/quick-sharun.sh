@@ -1969,25 +1969,32 @@ _stub_reloc_ok() {
 	done
 }
 
+_stub_sndfile() {
+	[ "$LIBSNDFILE_STUB" != 0 ] || return 1
+	[ -f "$STUB_DIR"/libsndfile.so.1 ] || return 1
+	if [ "$LIBSNDFILE_STUB" != 1 ]; then
+		_stub_only_pulse "$@" || return 1
+	fi
+	sndfile_users=$(_stub_users libsndfile.so.1 "$@")
+	[ -n "$sndfile_users" ]
+}
+
+_stub_systemd() {
+	[ "$LIBSYSTEMD_STUB" = 1 ] || return 1
+	[ -f "$STUB_DIR"/libsystemd.so.0 ] || return 1
+	systemd_users=$(_stub_users libsystemd.so.0 "$@")
+	[ -n "$systemd_users" ]
+}
+
 _stubs_enable() {
 	use_sndfile_stub=0
 	use_systemd_stub=0
 
-	[ -d "$STUB_DIR" ] || return 0
-
-	if [ "$LIBSNDFILE_STUB" != 0 ] && [ -f "$STUB_DIR"/libsndfile.so.1 ]; then
-		if [ "$LIBSNDFILE_STUB" = 1 ] || _stub_only_pulse "$@"; then
-			sndfile_users=$(_stub_users libsndfile.so.1 "$@")
-			if [ -n "$sndfile_users" ]; then
-				use_sndfile_stub=1
-			fi
-		fi
+	if _stub_sndfile "$@"; then
+		use_sndfile_stub=1
 	fi
-	if [ "$LIBSYSTEMD_STUB" = 1 ] && [ -f "$STUB_DIR"/libsystemd.so.0 ]; then
-		systemd_users=$(_stub_users libsystemd.so.0 "$@")
-		if [ -n "$systemd_users" ]; then
-			use_systemd_stub=1
-		fi
+	if _stub_systemd "$@"; then
+		use_systemd_stub=1
 	fi
 
 	if [ "$use_sndfile_stub" = 0 ] && [ "$use_systemd_stub" = 0 ]; then
