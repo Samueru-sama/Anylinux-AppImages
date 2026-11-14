@@ -1929,29 +1929,13 @@ _lib4bin_collect_strace() {
 	STRACED_LIBS=$(echo "$libs" | sort -u | sed '/^$/d')
 }
 
-# Dummy libraries from the sharun helper tarball.
-#
-# libsndfile is replaced automatically when the only deployed user of it is
-# libpulsecommon, which is how libpulse pulls it in. The codec libraries
-# that libsndfile would otherwise deploy (opus, FLAC, mpg123, lame, vorbis,
-# ogg) are then never collected.
-#
-# libsystemd is only replaced when LIBSYSTEMD_STUB=1 is set. The stub keeps
-# sd-daemon calls working with the no-systemd values, but sd-bus, sd-event,
-# sd-login and journal reads fail, so this is opt-in.
-#
-# Both stubs are validated with ldd -r against the libraries that need them,
-# so an older stub falls back to the real library.
-
-_stub_needs() {
-	patchelf --print-needed "$1" 2>/dev/null | grep -qx "$2"
-}
+# dummy libsystemd/libsndfile from the sharun helper tarball
 
 # 0 when libpulsecommon (or libpulse) is the only deployed user of libsndfile
 _stub_only_pulse() {
 	found=0
 	for f in $ldd_libs "$@"; do
-		_stub_needs "$f" libsndfile.so.1 || continue
+		patchelf --print-needed "$f" 2>/dev/null | grep -qx libsndfile.so.1 || continue
 		found=1
 		case "${f##*/}" in
 			libpulsecommon*|libpulse.so*) ;;
@@ -1966,7 +1950,7 @@ _stub_users() {
 	soname=$1
 	shift
 	for f in $ldd_libs "$@"; do
-		if _stub_needs "$f" "$soname"; then
+		if patchelf --print-needed "$f" 2>/dev/null | grep -qx "$soname"; then
 			echo "$f"
 		fi
 	done
@@ -1984,8 +1968,8 @@ _stub_reloc_ok() {
 }
 
 _stubs_enable() {
-	USE_SNDFILE_STUB=0
-	USE_SYSTEMD_STUB=0
+	use_sndfile_stub=0
+	use_systemd_stub=0
 
 	[ -d "$STUB_DIR" ] || return 0
 
@@ -1993,78 +1977,78 @@ _stubs_enable() {
 		if [ "$LIBSNDFILE_STUB" = 1 ] || _stub_only_pulse "$@"; then
 			sndfile_users=$(_stub_users libsndfile.so.1 "$@")
 			if [ -n "$sndfile_users" ]; then
-				USE_SNDFILE_STUB=1
+				use_sndfile_stub=1
 			fi
 		fi
 	fi
 	if [ "$LIBSYSTEMD_STUB" = 1 ] && [ -f "$STUB_DIR"/libsystemd.so.0 ]; then
 		systemd_users=$(_stub_users libsystemd.so.0 "$@")
 		if [ -n "$systemd_users" ]; then
-			USE_SYSTEMD_STUB=1
+			use_systemd_stub=1
 		fi
 	fi
 
-	if [ "$USE_SNDFILE_STUB" = 0 ] && [ "$USE_SYSTEMD_STUB" = 0 ]; then
+	if [ "$use_sndfile_stub" = 0 ] && [ "$use_systemd_stub" = 0 ]; then
 		return 0
 	fi
 
-	STUB_LD_DIR=$TMPDIR/.qs-stubs.$$
-	rm -rf "$STUB_LD_DIR"
-	mkdir -p "$STUB_LD_DIR"
-	if [ "$USE_SNDFILE_STUB" = 1 ]; then
-		cp -f "$STUB_DIR"/libsndfile.so.1 "$STUB_LD_DIR"/
+	stub_ld_dir=$TMPDIR/.qs-stubs.$$
+	rm -rf "$stub_ld_dir"
+	mkdir -p "$stub_ld_dir"
+	if [ "$use_sndfile_stub" = 1 ]; then
+		cp -f "$STUB_DIR"/libsndfile.so.1 "$stub_ld_dir"/
 	fi
-	if [ "$USE_SYSTEMD_STUB" = 1 ]; then
-		cp -f "$STUB_DIR"/libsystemd.so.0 "$STUB_LD_DIR"/
-	fi
-
-	STUB_OLD_LD=${LD_LIBRARY_PATH-}
-	export LD_LIBRARY_PATH="$STUB_LD_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-	if [ "$USE_SNDFILE_STUB" = 1 ] && ! _stub_reloc_ok sf_ $sndfile_users; then
-		USE_SNDFILE_STUB=0
-		rm -f "$STUB_LD_DIR"/libsndfile.so.1
-	fi
-	if [ "$USE_SYSTEMD_STUB" = 1 ] && ! _stub_reloc_ok sd_ $systemd_users; then
-		USE_SYSTEMD_STUB=0
-		rm -f "$STUB_LD_DIR"/libsystemd.so.0
+	if [ "$use_systemd_stub" = 1 ]; then
+		cp -f "$STUB_DIR"/libsystemd.so.0 "$stub_ld_dir"/
 	fi
 
-	if [ "$USE_SNDFILE_STUB" = 0 ] && [ "$USE_SYSTEMD_STUB" = 0 ]; then
-		if [ -n "${STUB_OLD_LD-}" ]; then
-			export LD_LIBRARY_PATH="$STUB_OLD_LD"
+	stub_old_ld=${LD_LIBRARY_PATH-}
+	export LD_LIBRARY_PATH="$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+	if [ "$use_sndfile_stub" = 1 ] && ! _stub_reloc_ok sf_ $sndfile_users; then
+		use_sndfile_stub=0
+		rm -f "$stub_ld_dir"/libsndfile.so.1
+	fi
+	if [ "$use_systemd_stub" = 1 ] && ! _stub_reloc_ok sd_ $systemd_users; then
+		use_systemd_stub=0
+		rm -f "$stub_ld_dir"/libsystemd.so.0
+	fi
+
+	if [ "$use_sndfile_stub" = 0 ] && [ "$use_systemd_stub" = 0 ]; then
+		if [ -n "${stub_old_ld-}" ]; then
+			export LD_LIBRARY_PATH="$stub_old_ld"
 		else
 			unset LD_LIBRARY_PATH
 		fi
-		rm -rf "$STUB_LD_DIR"
-		STUB_LD_DIR=
+		rm -rf "$stub_ld_dir"
+		stub_ld_dir=
 	fi
 }
 
 _stubs_finish() {
 	mkdir -p "$DST_LIB_DIR"
-	if [ "$USE_SNDFILE_STUB" = 1 ]; then
+	if [ "$use_sndfile_stub" = 1 ]; then
 		rm -f "$DST_LIB_DIR"/libsndfile.so.1*
-		cp -f "$STUB_LD_DIR"/libsndfile.so.1 "$DST_LIB_DIR"/libsndfile.so.1
+		cp -f "$stub_ld_dir"/libsndfile.so.1 "$DST_LIB_DIR"/libsndfile.so.1
 		if [ "$LIBSNDFILE_STUB" = 1 ]; then
 			_echo "* using the libsndfile stub (LIBSNDFILE_STUB=1)"
 		else
 			_echo "* using the libsndfile stub (only libpulsecommon needs it)"
 		fi
 	fi
-	if [ "$USE_SYSTEMD_STUB" = 1 ]; then
+	if [ "$use_systemd_stub" = 1 ]; then
 		rm -f "$DST_LIB_DIR"/libsystemd.so.0*
-		cp -f "$STUB_LD_DIR"/libsystemd.so.0 "$DST_LIB_DIR"/libsystemd.so.0
+		cp -f "$stub_ld_dir"/libsystemd.so.0 "$DST_LIB_DIR"/libsystemd.so.0
 		_echo "* using the libsystemd stub (LIBSYSTEMD_STUB=1)"
 	fi
-	if [ -n "${STUB_LD_DIR-}" ]; then
-		if [ -n "${STUB_OLD_LD-}" ]; then
-			export LD_LIBRARY_PATH="$STUB_OLD_LD"
+	if [ -n "${stub_ld_dir-}" ]; then
+		if [ -n "${stub_old_ld-}" ]; then
+			export LD_LIBRARY_PATH="$stub_old_ld"
 		else
 			unset LD_LIBRARY_PATH
 		fi
-		rm -rf "$STUB_LD_DIR"
-		STUB_LD_DIR=
+		rm -rf "$stub_ld_dir"
+		stub_ld_dir=
 	fi
 	rm -rf "$STUB_DIR"
 }
@@ -2075,8 +2059,8 @@ _lib4bin_deploy_shared_libs() {
 	_cache_dst=
 	for l do
 		case "$l" in "$STUB_DIR"/*) continue;; esac
-		if [ -n "${STUB_LD_DIR-}" ]; then
-			case "$l" in "$STUB_LD_DIR"/*) continue;; esac
+		if [ -n "${stub_ld_dir-}" ]; then
+			case "$l" in "$stub_ld_dir"/*) continue;; esac
 		fi
 		[ -f "$l" ] || continue
 		if ! _is_elf "$l"; then
@@ -2189,7 +2173,7 @@ _lib4bin_main() {
 	ldd_libs=$(_lib4bin_collect_ldd "$@")
 
 	_stubs_enable "$@"
-	if [ -n "${STUB_LD_DIR-}" ]; then
+	if [ -n "${stub_ld_dir-}" ]; then
 		_echo "Collecting dependencies again with the dummy libraries..."
 		ldd_libs=$(_lib4bin_collect_ldd "$@")
 	fi
