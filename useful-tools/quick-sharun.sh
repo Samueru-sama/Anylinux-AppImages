@@ -49,6 +49,7 @@ APPENV=$APPDIR/.env
 DIRICON=$APPDIR/.DirIcon
 DST_LIB_DIR=$APPDIR/lib
 PRELOAD_DIR=$DST_LIB_DIR/sharun-preload
+STUB_DIR=$PRELOAD_DIR/stubs
 DST_BIN_DIR=$APPDIR/bin
 SHARUN_BIN_DIR=$APPDIR/shared/bin
 MAIN_BIN=${MAIN_BIN##*/}
@@ -92,7 +93,7 @@ QUICK_SHARUN_SKIP_DEPS_FOR="
 	libqgtk3.so
 "
 
-SHARUN_LINK=${SHARUN_LINK:-https://github.com/pkgforge-dev/Anylinux-sharun/releases/download/3.8.5/sharun+helper-libs-$APPIMAGE_ARCH.tar}
+SHARUN_LINK=${SHARUN_LINK:-https://github.com/pkgforge-dev/Anylinux-sharun/releases/download/3.9.0/sharun+helper-libs-$APPIMAGE_ARCH.tar}
 SHARUN_TARBALL=$TMPDIR/sharun+helper-libs-$APPIMAGE_ARCH.tar
 APPIMAGETOOL_LINK=${APPIMAGETOOL_LINK:-https://github.com/pkgforge-dev/appimagetool/releases/download/0.5.6/appimagetool-full-$APPIMAGE_ARCH-linux}
 APPIMAGETOOL=${APPIMAGETOOL:-$TMPDIR/appimagetool}
@@ -106,33 +107,33 @@ ONELF=${ONELF:-$TMPDIR/onelf}
 case "$APPIMAGE_ARCH" in
 	x86_64)
 		APPIMAGETOOL_SHA=a92214d831d234d1be31699657c572799e5c8417c9abf129e2f748cc9c612f85
-		SHARUN_SHA=b365f67b67fb94f2e87bc114233fd22c21e57e898b932d5d2e2e8d48a01fe0f1
+		SHARUN_SHA=cc820113162cd8a56ccc66a85b638d9c4fc3802819327719323911adc9311b2b
 		ONELF_SHA=3a990243790c026c902330a7744e8c21b25fdc8c694a88e79d6fb25d761a6351
 		CROSS_LIBC_DLOPEN_TAR_SHA=35bd45e4d0ce94e8ac86b2dded676f4a371747d0f47004861d4c25f374351ec8
 		;;
 	aarch64)
 		APPIMAGETOOL_SHA=22cf8c710afb5b96e59fa90cf2cd6851aa388d4f1c01c123b1e7e2608a13c2f6
-		SHARUN_SHA=26c5e73daec704dd0d307cce701ae2d72f22a781a5d90c56ba74df4f17c62018
+		SHARUN_SHA=89357920749fc9f84eafa3f4be9e1cc1b238cf0a780d6a64f8a2894d303f6031
 		ONELF_SHA=9b5b2c3d031756a064bd9a71a977e229cb359f324937a5ba8a28db1568bae15b
 		CROSS_LIBC_DLOPEN_TAR_SHA=6d2a6bdfa5602656cb62975c2980f808cc26befd6904ba077d99522c1bb56802
 		;;
 	riscv64)
 		APPIMAGETOOL_SHA=4ae9bace09d1330c5185228e550836d9c10a901c0717d60f84a41792b0db53d1
-		SHARUN_SHA=c7ca5871da1f8335b483cfdceab37768ee4af92ff3dd9daeefaf81bfe957bab7
+		SHARUN_SHA=65a0ab04dc9d95f2d98f70f4a77cdb8f3c99947c383c9bb6eb2142327135747a
 		CROSS_LIBC_DLOPEN_TAR_SHA=df9db6aa8ed941df317d98414706147cbf88d097135502aefc7e1db7e8642ec1
 		;;
 	ppc64)
 		APPIMAGETOOL_SHA=4be7f59fcd80e59d2a60758f55396747ca9ccfaf209a360049957808668d44c3
-		SHARUN_SHA=e41ea619d5534c7357f2a0c2cf498b566dedd3ab0339d6cedbec0955d99954c5
+		SHARUN_SHA=553faf56d3c3db9589b7c897fae3f2cb04f8b3a32f4066732e45a1c7550c3f05
 		;;
 	ppc64le)
 		APPIMAGETOOL_SHA=91a01c802217513d3fe44d5e1dc868250e1072d3c844e48dd00dce308050154b
-		SHARUN_SHA=71e6256ad5ff6dcd86fc226574e64460176e4b13d77fa3ad1a15b1dea915e4bf
+		SHARUN_SHA=286569e39e3dff639da1c481d144a25d006415cdacbfc42356a1aa9abcd194e2
 		CROSS_LIBC_DLOPEN_TAR_SHA=3a6be20fc1150b44b45d85e7dedb9c3a8489a633111923ffe7569d6746f57409
 		;;
 	loongarch64)
 		APPIMAGETOOL_SHA=d9f989b7b4ec340739e53fae77817b6625fb47b09ddecacf26b65441a008f446
-		SHARUN_SHA=4e8195a701cee7c82871f7461e89a12ce69b2e75332c30da54f7f84bc3519684
+		SHARUN_SHA=8e4819af969e8761a1c42c443968a318553b608e6f6e5cdbca65d60db4807b16
 		CROSS_LIBC_DLOPEN_TAR_SHA=9a4ce931f6572992ed5f951900482155890ab584a876ca1e93d808c048f77c1a
 		;;
 esac
@@ -351,6 +352,16 @@ _help_msg() {
 	                        if you want to deploy ALL Gstreamer plugins. (Very bloated).
 	  LIB_DIR          Set source library directory if autodetection fails.
 	  NO_STRIP         Disable stripping binaries and libraries if set.
+	  LIBSNDFILE_STUB  Set to 1 to always use the libsndfile stub, or 0 to
+	                     never use it. When unset, the stub is used when
+	                     the only deployed user of libsndfile is
+	                     libpulsecommon. This avoids deploying opus, FLAC,
+	                     mpg123, lame, vorbis and ogg.
+	  LIBSYSTEMD_STUB  Set to 1 to replace the bundled libsystemd with the
+	                     dummy stub from the sharun helper tarball. sd-bus,
+	                     sd-event, sd-login and journal reads will fail;
+	                     sd-daemon and sd-journal logging answer with the
+	                     no-systemd values. Opt-in only.
 	  APPDIR           Destination AppDir (default: ./AppDir).
 	  SKIP_INTEGRITY_CHECKS  Set to 1 to skip the sha256 checks of the files
 	                     downloaded by quick-sharun. Only do this if you are
@@ -1918,11 +1929,155 @@ _lib4bin_collect_strace() {
 	STRACED_LIBS=$(echo "$libs" | sort -u | sed '/^$/d')
 }
 
+# Dummy libraries from the sharun helper tarball.
+#
+# libsndfile is replaced automatically when the only deployed user of it is
+# libpulsecommon, which is how libpulse pulls it in. The codec libraries
+# that libsndfile would otherwise deploy (opus, FLAC, mpg123, lame, vorbis,
+# ogg) are then never collected.
+#
+# libsystemd is only replaced when LIBSYSTEMD_STUB=1 is set. The stub keeps
+# sd-daemon calls working with the no-systemd values, but sd-bus, sd-event,
+# sd-login and journal reads fail, so this is opt-in.
+#
+# Both stubs are validated with ldd -r against the libraries that need them,
+# so an older stub falls back to the real library.
+
+_stub_needs() {
+	patchelf --print-needed "$1" 2>/dev/null | grep -qx "$2"
+}
+
+# 0 when libpulsecommon (or libpulse) is the only deployed user of libsndfile
+_stub_only_pulse() {
+	found=0
+	for f in $ldd_libs "$@"; do
+		_stub_needs "$f" libsndfile.so.1 || continue
+		found=1
+		case "${f##*/}" in
+			libpulsecommon*|libpulse.so*) ;;
+			*) return 1;;
+		esac
+	done
+	[ "$found" = 1 ]
+}
+
+# files in the deployment set that need a given soname
+_stub_users() {
+	soname=$1
+	shift
+	for f in $ldd_libs "$@"; do
+		if _stub_needs "$f" "$soname"; then
+			echo "$f"
+		fi
+	done
+}
+
+# 0 when none of the given files has an unresolved stub symbol
+_stub_reloc_ok() {
+	prefix=$1
+	shift
+	for f do
+		if ldd -r "$f" 2>&1 | grep -q "undefined symbol: $prefix"; then
+			return 1
+		fi
+	done
+}
+
+_stubs_enable() {
+	USE_SNDFILE_STUB=0
+	USE_SYSTEMD_STUB=0
+
+	[ -d "$STUB_DIR" ] || return 0
+
+	if [ "$LIBSNDFILE_STUB" != 0 ] && [ -f "$STUB_DIR"/libsndfile.so.1 ]; then
+		if [ "$LIBSNDFILE_STUB" = 1 ] || _stub_only_pulse "$@"; then
+			sndfile_users=$(_stub_users libsndfile.so.1 "$@")
+			if [ -n "$sndfile_users" ]; then
+				USE_SNDFILE_STUB=1
+			fi
+		fi
+	fi
+	if [ "$LIBSYSTEMD_STUB" = 1 ] && [ -f "$STUB_DIR"/libsystemd.so.0 ]; then
+		systemd_users=$(_stub_users libsystemd.so.0 "$@")
+		if [ -n "$systemd_users" ]; then
+			USE_SYSTEMD_STUB=1
+		fi
+	fi
+
+	if [ "$USE_SNDFILE_STUB" = 0 ] && [ "$USE_SYSTEMD_STUB" = 0 ]; then
+		return 0
+	fi
+
+	STUB_LD_DIR=$TMPDIR/.qs-stubs.$$
+	rm -rf "$STUB_LD_DIR"
+	mkdir -p "$STUB_LD_DIR"
+	if [ "$USE_SNDFILE_STUB" = 1 ]; then
+		cp -f "$STUB_DIR"/libsndfile.so.1 "$STUB_LD_DIR"/
+	fi
+	if [ "$USE_SYSTEMD_STUB" = 1 ]; then
+		cp -f "$STUB_DIR"/libsystemd.so.0 "$STUB_LD_DIR"/
+	fi
+
+	STUB_OLD_LD=${LD_LIBRARY_PATH-}
+	export LD_LIBRARY_PATH="$STUB_LD_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+	if [ "$USE_SNDFILE_STUB" = 1 ] && ! _stub_reloc_ok sf_ $sndfile_users; then
+		USE_SNDFILE_STUB=0
+		rm -f "$STUB_LD_DIR"/libsndfile.so.1
+	fi
+	if [ "$USE_SYSTEMD_STUB" = 1 ] && ! _stub_reloc_ok sd_ $systemd_users; then
+		USE_SYSTEMD_STUB=0
+		rm -f "$STUB_LD_DIR"/libsystemd.so.0
+	fi
+
+	if [ "$USE_SNDFILE_STUB" = 0 ] && [ "$USE_SYSTEMD_STUB" = 0 ]; then
+		if [ -n "${STUB_OLD_LD-}" ]; then
+			export LD_LIBRARY_PATH="$STUB_OLD_LD"
+		else
+			unset LD_LIBRARY_PATH
+		fi
+		rm -rf "$STUB_LD_DIR"
+		STUB_LD_DIR=
+	fi
+}
+
+_stubs_finish() {
+	mkdir -p "$DST_LIB_DIR"
+	if [ "$USE_SNDFILE_STUB" = 1 ]; then
+		rm -f "$DST_LIB_DIR"/libsndfile.so.1*
+		cp -f "$STUB_LD_DIR"/libsndfile.so.1 "$DST_LIB_DIR"/libsndfile.so.1
+		if [ "$LIBSNDFILE_STUB" = 1 ]; then
+			_echo "* using the libsndfile stub (LIBSNDFILE_STUB=1)"
+		else
+			_echo "* using the libsndfile stub (only libpulsecommon needs it)"
+		fi
+	fi
+	if [ "$USE_SYSTEMD_STUB" = 1 ]; then
+		rm -f "$DST_LIB_DIR"/libsystemd.so.0*
+		cp -f "$STUB_LD_DIR"/libsystemd.so.0 "$DST_LIB_DIR"/libsystemd.so.0
+		_echo "* using the libsystemd stub (LIBSYSTEMD_STUB=1)"
+	fi
+	if [ -n "${STUB_LD_DIR-}" ]; then
+		if [ -n "${STUB_OLD_LD-}" ]; then
+			export LD_LIBRARY_PATH="$STUB_OLD_LD"
+		else
+			unset LD_LIBRARY_PATH
+		fi
+		rm -rf "$STUB_LD_DIR"
+		STUB_LD_DIR=
+	fi
+	rm -rf "$STUB_DIR"
+}
+
 # deploy shared libraries to DST_LIB_DIR
 _lib4bin_deploy_shared_libs() {
 	_cache_src=
 	_cache_dst=
 	for l do
+		case "$l" in "$STUB_DIR"/*) continue;; esac
+		if [ -n "${STUB_LD_DIR-}" ]; then
+			case "$l" in "$STUB_LD_DIR"/*) continue;; esac
+		fi
 		[ -f "$l" ] || continue
 		if ! _is_elf "$l"; then
 			_echo "SKIPPED: [$l] not shared object!"
@@ -2033,6 +2188,12 @@ _lib4bin_main() {
 	_echo "Collecting dependencies..."
 	ldd_libs=$(_lib4bin_collect_ldd "$@")
 
+	_stubs_enable "$@"
+	if [ -n "${STUB_LD_DIR-}" ]; then
+		_echo "Collecting dependencies again with the dummy libraries..."
+		ldd_libs=$(_lib4bin_collect_ldd "$@")
+	fi
+
 	if [ "$STRACE_MODE" = 1 ]; then
 		_echo "Collecting dlopen libraries via LD_DEBUG=libs..."
 		_lib4bin_collect_strace "$@"
@@ -2045,6 +2206,8 @@ _lib4bin_main() {
 
 	_echo "Deploying binaries..."
 	_lib4bin_deploy_binaries "$@"
+
+	_stubs_finish
 
 	_echo "Generating lib.path..."
 	if [ -x "$APPDIR/sharun" ]; then
