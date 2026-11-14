@@ -2072,7 +2072,6 @@ _lib4bin_deploy_shared_libs() {
 	_cache_src=
 	_cache_dst=
 	for l do
-		case "$l" in "$STUB_DIR"/*) continue;; esac
 		[ -f "$l" ] || continue
 		if ! _is_elf "$l"; then
 			_echo "SKIPPED: [$l] not shared object!"
