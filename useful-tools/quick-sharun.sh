@@ -354,14 +354,16 @@ _help_msg() {
 	  NO_STRIP         Disable stripping binaries and libraries if set.
 	  LIBSNDFILE_STUB  Set to 1 to always use the libsndfile stub, or 0 to
 	                     never use it. When unset, the stub is used when
-	                     the only deployed user of libsndfile is
-	                     libpulsecommon. This avoids deploying opus, FLAC,
-	                     mpg123, lame, vorbis and ogg.
+	                     libpulsecommon is the only deployed user.
+	                     libpulsecommon only uses libsndfile for the
+	                     pa_sndfile_* file I/O helpers of pacat/paplay/pactl
+	                     and a few modules, not for the client API, so apps
+	                     that only play audio do not need it. This avoids
+	                     deploying opus, FLAC, mpg123, lame, vorbis and ogg.
 	  LIBSYSTEMD_STUB  Set to 1 to replace the bundled libsystemd with the
-	                     dummy stub from the sharun helper tarball. sd-bus,
-	                     sd-event, sd-login and journal reads will fail;
-	                     sd-daemon and sd-journal logging answer with the
-	                     no-systemd values. Opt-in only.
+	                     dummy stub. In many apps libsystemd is only pulled in
+	                     by libdbus and PulseAudio, where the stub is safe,
+	                     but this has to be checked for each app. Opt-in only.
 	  APPDIR           Destination AppDir (default: ./AppDir).
 	  SKIP_INTEGRITY_CHECKS  Set to 1 to skip the sha256 checks of the files
 	                     downloaded by quick-sharun. Only do this if you are
