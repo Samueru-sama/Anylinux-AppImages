@@ -2004,7 +2004,7 @@ _stubs_enable() {
 		cp -f "$STUB_DIR"/libsystemd.so.0 "$stub_ld_dir"/
 	fi
 
-	stub_old_ld=${LD_LIBRARY_PATH-}
+	stub_old_ld=$LD_LIBRARY_PATH
 	export LD_LIBRARY_PATH="$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 	if [ "$use_sndfile_stub" = 1 ] && ! _stub_reloc_ok sf_ $sndfile_users; then
@@ -2017,7 +2017,7 @@ _stubs_enable() {
 	fi
 
 	if [ "$use_sndfile_stub" = 0 ] && [ "$use_systemd_stub" = 0 ]; then
-		if [ -n "${stub_old_ld-}" ]; then
+		if [ -n "$stub_old_ld" ]; then
 			export LD_LIBRARY_PATH="$stub_old_ld"
 		else
 			unset LD_LIBRARY_PATH
@@ -2041,8 +2041,8 @@ _stubs_finish() {
 		cp -f "$stub_ld_dir"/libsystemd.so.0 "$DST_LIB_DIR"/libsystemd.so.0
 		_echo "* using the libsystemd stub (LIBSYSTEMD_STUB=1)"
 	fi
-	if [ -n "${stub_ld_dir-}" ]; then
-		if [ -n "${stub_old_ld-}" ]; then
+	if [ -n "$stub_ld_dir" ]; then
+		if [ -n "$stub_old_ld" ]; then
 			export LD_LIBRARY_PATH="$stub_old_ld"
 		else
 			unset LD_LIBRARY_PATH
@@ -2059,7 +2059,7 @@ _lib4bin_deploy_shared_libs() {
 	_cache_dst=
 	for l do
 		case "$l" in "$STUB_DIR"/*) continue;; esac
-		if [ -n "${stub_ld_dir-}" ]; then
+		if [ -n "$stub_ld_dir" ]; then
 			case "$l" in "$stub_ld_dir"/*) continue;; esac
 		fi
 		[ -f "$l" ] || continue
@@ -2173,7 +2173,7 @@ _lib4bin_main() {
 	ldd_libs=$(_lib4bin_collect_ldd "$@")
 
 	_stubs_enable "$@"
-	if [ -n "${stub_ld_dir-}" ]; then
+	if [ -n "$stub_ld_dir" ]; then
 		_echo "Collecting dependencies again with the dummy libraries..."
 		ldd_libs=$(_lib4bin_collect_ldd "$@")
 	fi
