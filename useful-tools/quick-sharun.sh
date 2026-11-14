@@ -1736,9 +1736,7 @@ _deploy_libs() {
 _lib4bin_get_lib_dst_dir() {
 	p=$(readlink -f "${1%/*}") || :
 	case "$p" in "$LIB_DIR"*) p=${p#"$LIB_DIR"};; esac
-	if [ -n "$stub_ld_dir" ]; then
-		case "$p" in "$stub_ld_dir"*) p=;; esac
-	fi
+	p=${p#"$stub_ld_dir"}
 	p=${p#/usr}
 	p=${p#/opt}
 	p=${p#/lib64}
