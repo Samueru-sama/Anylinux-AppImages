@@ -1736,6 +1736,9 @@ _deploy_libs() {
 _lib4bin_get_lib_dst_dir() {
 	p=$(readlink -f "${1%/*}") || :
 	case "$p" in "$LIB_DIR"*) p=${p#"$LIB_DIR"};; esac
+	if [ -n "$stub_ld_dir" ]; then
+		case "$p" in "$stub_ld_dir"*) p=;; esac
+	fi
 	p=${p#/usr}
 	p=${p#/opt}
 	p=${p#/lib64}
@@ -2003,7 +2006,7 @@ _stubs_enable() {
 		return 0
 	fi
 
-	stub_ld_dir=$TMPDIR/.qs-stubs.$$
+	stub_ld_dir=$(readlink -f "$TMPDIR")/.qs-stubs.$$
 	_ld_path=$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 	rm -rf "$stub_ld_dir"
 	mkdir -p "$stub_ld_dir"
@@ -2042,17 +2045,14 @@ _stubs_enable() {
 }
 
 _stubs_finish() {
-	mkdir -p "$DST_LIB_DIR"
-	if [ "$use_sndfile_stub" = 1 ] && [ ! -e "$DST_LIB_DIR"/libsndfile.so.1 ]; then
-		cp -f "$stub_ld_dir"/libsndfile.so.1 "$DST_LIB_DIR"/libsndfile.so.1
+	if [ "$use_sndfile_stub" = 1 ]; then
 		if [ "$LIBSNDFILE_STUB" = 1 ]; then
 			_echo "* using the libsndfile stub (LIBSNDFILE_STUB=1)"
 		else
 			_echo "* using the libsndfile stub (only libpulsecommon needs it)"
 		fi
 	fi
-	if [ "$use_systemd_stub" = 1 ] && [ ! -e "$DST_LIB_DIR"/libsystemd.so.0 ]; then
-		cp -f "$stub_ld_dir"/libsystemd.so.0 "$DST_LIB_DIR"/libsystemd.so.0
+	if [ "$use_systemd_stub" = 1 ]; then
 		_echo "* using the libsystemd stub (LIBSYSTEMD_STUB=1)"
 	fi
 	if [ -n "$stub_ld_dir" ]; then
@@ -2073,9 +2073,6 @@ _lib4bin_deploy_shared_libs() {
 	_cache_dst=
 	for l do
 		case "$l" in "$STUB_DIR"/*) continue;; esac
-		if [ -n "$stub_ld_dir" ]; then
-			case "$l" in "$stub_ld_dir"/*) continue;; esac
-		fi
 		[ -f "$l" ] || continue
 		if ! _is_elf "$l"; then
 			_echo "SKIPPED: [$l] not shared object!"
