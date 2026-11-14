@@ -2003,7 +2003,7 @@ _stubs_enable() {
 	_stub_sndfile "$@" || :
 	_stub_systemd "$@" || :
 	if [ "$use_sndfile_stub" = 0 ] && [ "$use_systemd_stub" = 0 ]; then
-		return 0
+		return 1
 	fi
 
 	stub_ld_dir=$(readlink -f "$TMPDIR")/.qs-stubs.$$
@@ -2034,14 +2034,16 @@ _stubs_enable() {
 	fi
 
 	# only expose the staging dir if at least one stub survived
-	if [ "$use_sndfile_stub" = 1 ] || [ "$use_systemd_stub" = 1 ]; then
-		stub_old_ld=$LD_LIBRARY_PATH
-		LD_LIBRARY_PATH=$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-		export LD_LIBRARY_PATH
-	else
+	if [ "$use_sndfile_stub" = 0 ] && [ "$use_systemd_stub" = 0 ]; then
 		rm -rf "$stub_ld_dir"
 		stub_ld_dir=
+		return 1
 	fi
+
+	stub_old_ld=$LD_LIBRARY_PATH
+	LD_LIBRARY_PATH=$stub_ld_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+	export LD_LIBRARY_PATH
+	return 0
 }
 
 _stubs_finish() {
@@ -2183,8 +2185,7 @@ _lib4bin_main() {
 	_echo "Collecting dependencies..."
 	ldd_libs=$(_lib4bin_collect_ldd "$@")
 
-	_stubs_enable "$@"
-	if [ -n "$stub_ld_dir" ]; then
+	if _stubs_enable "$@"; then
 		_echo "Collecting dependencies again with the dummy libraries..."
 		ldd_libs=$(_lib4bin_collect_ldd "$@")
 	fi
